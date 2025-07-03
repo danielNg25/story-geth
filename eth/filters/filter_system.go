@@ -31,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/filtermaps"
 	"github.com/ethereum/go-ethereum/core/history"
+	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
@@ -62,7 +63,7 @@ type Backend interface {
 	GetBody(ctx context.Context, hash common.Hash, number rpc.BlockNumber) (*types.Body, error)
 	GetReceipts(ctx context.Context, blockHash common.Hash) (types.Receipts, error)
 	GetLogs(ctx context.Context, blockHash common.Hash, number uint64) ([][]*types.Log, error)
-
+	Pending() (*types.Block, types.Receipts, *state.StateDB)
 	CurrentHeader() *types.Header
 	ChainConfig() *params.ChainConfig
 	HistoryPruningCutoff() uint64
@@ -151,6 +152,10 @@ const (
 	UnknownSubscription Type = iota
 	// LogsSubscription queries for new or removed (chain reorg) logs
 	LogsSubscription
+	// PendingLogsSubscription queries for logs in pending blocks
+	PendingLogsSubscription
+	// MinedAndPendingLogsSubscription queries for logs in mined and pending blocks.
+	MinedAndPendingLogsSubscription
 	// PendingTransactionsSubscription queries for pending transactions entering
 	// the pending state
 	PendingTransactionsSubscription
@@ -393,6 +398,18 @@ func (es *EventSystem) handleLogs(filters filterIndex, ev []*types.Log) {
 	}
 }
 
+func (es *EventSystem) handlePendingLogs(filters filterIndex, logs []*types.Log) {
+	if len(logs) == 0 {
+		return
+	}
+	for _, f := range filters[PendingLogsSubscription] {
+		matchedLogs := filterLogs(logs, nil, f.logsCrit.ToBlock, f.logsCrit.Addresses, f.logsCrit.Topics)
+		if len(matchedLogs) > 0 {
+			f.logs <- matchedLogs
+		}
+	}
+}
+
 func (es *EventSystem) handleTxsEvent(filters filterIndex, ev core.NewTxsEvent) {
 	for _, f := range filters[PendingTransactionsSubscription] {
 		f.txs <- ev.Txs
@@ -430,13 +447,45 @@ func (es *EventSystem) eventLoop() {
 			es.handleLogs(index, ev.Logs)
 		case ev := <-es.chainCh:
 			es.handleChainEvent(index, ev)
+			// If we have no pending log subscription,
+			// we don't need to collect any pending logs.
+			if len(index[PendingLogsSubscription]) == 0 {
+				continue
+			}
 
+			// Pull the pending logs if there is a new chain head.
+			pendingBlock, pendingReceipts, _ := es.backend.Pending()
+			if pendingBlock == nil || pendingReceipts == nil {
+				continue
+			}
+			if pendingBlock.ParentHash() != ev.Header.Hash() {
+				continue
+			}
+			var logs []*types.Log
+			for _, receipt := range pendingReceipts {
+				if len(receipt.Logs) > 0 {
+					logs = append(logs, receipt.Logs...)
+				}
+			}
+			es.handlePendingLogs(index, logs)
 		case f := <-es.install:
-			index[f.typ][f.id] = f
+			if f.typ == MinedAndPendingLogsSubscription {
+				// the type are logs and pending logs subscriptions
+				index[LogsSubscription][f.id] = f
+				index[PendingLogsSubscription][f.id] = f
+			} else {
+				index[f.typ][f.id] = f
+			}
 			close(f.installed)
 
 		case f := <-es.uninstall:
-			delete(index[f.typ], f.id)
+			if f.typ == MinedAndPendingLogsSubscription {
+				// the type are logs and pending logs subscriptions
+				delete(index[LogsSubscription], f.id)
+				delete(index[PendingLogsSubscription], f.id)
+			} else {
+				delete(index[f.typ], f.id)
+			}
 			close(f.err)
 
 		// System stopped
