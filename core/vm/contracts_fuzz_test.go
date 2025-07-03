@@ -17,14 +17,13 @@
 package vm
 
 import (
-	"github.com/ethereum/go-ethereum/core/rawdb"
+	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
-	"testing"
-
-	"github.com/ethereum/go-ethereum/common"
 )
 
 func FuzzPrecompiledContracts(f *testing.F) {
@@ -43,8 +42,8 @@ func FuzzPrecompiledContracts(f *testing.F) {
 		vmctx := BlockContext{
 			Transfer: func(StateDB, common.Address, common.Address, *uint256.Int) {},
 		}
-		statedb, _ := state.New(types.EmptyRootHash, state.NewDatabase(rawdb.NewMemoryDatabase()), nil)
-		evm := NewEVM(vmctx, TxContext{}, statedb, params.AllEthashProtocolChanges, Config{})
+		statedb, _ := state.New(types.EmptyRootHash, state.NewDatabaseForTesting())
+		evm := NewEVM(vmctx, statedb, params.AllEthashProtocolChanges, Config{})
 		inWant := string(input)
 		RunPrecompiledContract(evm, p, input, gas, nil)
 		if inHave := string(input); inWant != inHave {
